@@ -18,12 +18,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
     header('Content-Type: application/json');
     
     try {
+        // Check if tables exist
+        $tables_exist = true;
+        $required_tables = ['company_applications_new', 'job_packages', 'activity_logs'];
+        
+        foreach ($required_tables as $table) {
+            $check = $pdo->query("SHOW TABLES LIKE '$table'");
+            if ($check->rowCount() == 0) {
+                $tables_exist = false;
+                throw new Exception("Database table '$table' does not exist. Please run the SQL setup first.");
+            }
+        }
+        
         // Validate required fields
         $required_fields = ['company_name', 'company_type', 'industry', 'company_size', 'website', 'description', 'contact_name', 'contact_position', 'contact_email', 'contact_phone', 'selected_package'];
         
         foreach ($required_fields as $field) {
             if (empty($_POST[$field])) {
-                throw new Exception("All required fields must be filled");
+                throw new Exception("All required fields must be filled. Missing: $field");
             }
         }
         
@@ -49,7 +61,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ");
         
-        $stmt->execute([
+        $result = $stmt->execute([
             $user_id,
             $_POST['company_name'],
             $_POST['company_type'],
@@ -65,12 +77,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
             $_POST['selected_package']
         ]);
         
+        if (!$result) {
+            throw new Exception("Failed to insert application data");
+        }
+        
         $application_id = $pdo->lastInsertId();
         
         // Handle file uploads
         $upload_dir = 'uploads/company_documents/';
         if (!file_exists($upload_dir)) {
-            mkdir($upload_dir, 0777, true);
+            if (!mkdir($upload_dir, 0777, true)) {
+                throw new Exception("Failed to create upload directory");
+            }
         }
         
         // Upload registration proof
@@ -80,10 +98,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
             $filename = 'reg_' . $application_id . '_' . time() . '.' . $extension;
             $filepath = $upload_dir . $filename;
             
-            if (move_uploaded_file($file['tmp_name'], $filepath)) {
-                // Insert into company_documents table (you might want to link to application)
-                // For now, we'll just store the path in session or handle later
-                $_SESSION['uploaded_docs'][] = $filepath;
+            if (!move_uploaded_file($file['tmp_name'], $filepath)) {
+                throw new Exception("Failed to upload registration proof");
             }
         }
         
@@ -94,8 +110,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
             $filename = 'tax_' . $application_id . '_' . time() . '.' . $extension;
             $filepath = $upload_dir . $filename;
             
-            if (move_uploaded_file($file['tmp_name'], $filepath)) {
-                $_SESSION['uploaded_docs'][] = $filepath;
+            if (!move_uploaded_file($file['tmp_name'], $filepath)) {
+                throw new Exception("Failed to upload tax document");
             }
         }
         
@@ -110,8 +126,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                     $filename = 'add_' . $application_id . '_' . time() . '_' . $i . '.' . $extension;
                     $filepath = $upload_dir . $filename;
                     
-                    if (move_uploaded_file($files['tmp_name'][$i], $filepath)) {
-                        $_SESSION['uploaded_docs'][] = $filepath;
+                    if (!move_uploaded_file($files['tmp_name'][$i], $filepath)) {
+                        throw new Exception("Failed to upload additional document");
                     }
                 }
             }
@@ -119,13 +135,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
         
         // Log activity
         $log_stmt = $pdo->prepare("INSERT INTO activity_logs (user_id, action, details, ip_address) VALUES (?, 'company_application', ?, ?)");
-        $log_stmt->execute([$user_id, 'Submitted company application for ' . $_POST['company_name'], $_SERVER['REMOTE_ADDR']]);
+        $log_result = $log_stmt->execute([$user_id, 'Submitted company application for ' . $_POST['company_name'], $_SERVER['REMOTE_ADDR']]);
+        
+        if (!$log_result) {
+            // Non-critical error, just log it but don't fail the transaction
+            error_log("Failed to log activity for user $user_id");
+        }
         
         // Commit transaction
         $pdo->commit();
         
-        // Send confirmation email (implement email function)
-        sendCompanyApplicationEmail($user_email, $_POST['company_name']);
+        // Send confirmation email (optional - remove if causing issues)
+        @mail($user_email, "Company Application Received", "Thank you for applying...");
         
         echo json_encode([
             'success' => true,
@@ -133,8 +154,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
             'application_id' => $application_id
         ]);
         
-    } catch (Exception $e) {
+    } catch (PDOException $e) {
         $pdo->rollBack();
+        echo json_encode([
+            'success' => false,
+            'message' => 'Database error: ' . $e->getMessage()
+        ]);
+    } catch (Exception $e) {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
         echo json_encode([
             'success' => false,
             'message' => $e->getMessage()
@@ -143,25 +172,53 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
     exit;
 }
 
-// Function to send email (implement based on your email setup)
-function sendCompanyApplicationEmail($email, $company_name) {
-    // Use PHP mailer or your preferred email sending method
-    $subject = "Company Application Received - StudentsArea";
-    $message = "Dear $company_name,\n\n";
-    $message .= "Thank you for submitting your company application to StudentsArea. Our team will review your application within 24-48 hours.\n\n";
-    $message .= "Once verified, you'll be able to post jobs and connect with talented students.\n\n";
-    $message .= "Best regards,\nStudentsArea Team";
-    
-    mail($email, $subject, $message);
+// Get user's existing applications with error handling
+try {
+    $stmt = $pdo->prepare("SELECT * FROM company_applications_new WHERE user_id = ? ORDER BY submitted_at DESC LIMIT 1");
+    $stmt->execute([$user_id]);
+    $result = $stmt->fetch();
+    $existing_application = $result ?: [];
+} catch (Exception $e) {
+    $existing_application = [];
+    error_log("Error fetching existing applications: " . $e->getMessage());
 }
 
+// Get available packages with error handling
+try {
+    $packages = $pdo->query("SELECT * FROM job_packages WHERE is_active = 1 ORDER BY price")->fetchAll();
+    if (empty($packages)) {
+        // Fallback packages if table doesn't exist or is empty
+        $packages = [
+            ['package_name' => 'basic', 'price' => 49.00, 'job_posts' => 1, 'listing_days' => 30, 'applications_limit' => 50, 'has_featured_tag' => false, 'has_priority_support' => false],
+            ['package_name' => 'standard', 'price' => 99.00, 'job_posts' => 3, 'listing_days' => 45, 'applications_limit' => 150, 'has_featured_tag' => true, 'has_priority_support' => false],
+            ['package_name' => 'premium', 'price' => 199.00, 'job_posts' => 10, 'listing_days' => 60, 'applications_limit' => null, 'has_featured_tag' => true, 'has_priority_support' => true]
+        ];
+    }
+} catch (Exception $e) {
+    // Fallback packages if table doesn't exist
+    $packages = [
+        ['package_name' => 'basic', 'price' => 49.00, 'job_posts' => 1, 'listing_days' => 30, 'applications_limit' => 50, 'has_featured_tag' => false, 'has_priority_support' => false],
+        ['package_name' => 'standard', 'price' => 99.00, 'job_posts' => 3, 'listing_days' => 45, 'applications_limit' => 150, 'has_featured_tag' => true, 'has_priority_support' => false],
+        ['package_name' => 'premium', 'price' => 199.00, 'job_posts' => 10, 'listing_days' => 60, 'applications_limit' => null, 'has_featured_tag' => true, 'has_priority_support' => true]
+    ];
+    error_log("Error fetching packages: " . $e->getMessage());
+}
 // Get user's existing applications
 $stmt = $pdo->prepare("SELECT * FROM company_applications_new WHERE user_id = ? ORDER BY submitted_at DESC LIMIT 1");
 $stmt->execute([$user_id]);
-$existing_application = $stmt->fetch();
+$result = $stmt->fetch();
+
+// Initialize as empty array if no result
+$existing_application = [];
+if ($result !== false) {
+    $existing_application = $result;
+}
 
 // Get available packages
 $packages = $pdo->query("SELECT * FROM job_packages WHERE is_active = 1 ORDER BY price")->fetchAll();
+if ($packages === false) {
+    $packages = [];
+}
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -483,11 +540,11 @@ $packages = $pdo->query("SELECT * FROM job_packages WHERE is_active = 1 ORDER BY
                         <p class="text-muted">Complete your company profile to start posting jobs.</p>
                     </div>
                     
-                    <?php if ($existing_application && $existing_application['status'] === 'pending'): ?>
+                    <?php if (!empty($existing_application) && isset($existing_application['status']) && $existing_application['status'] === 'pending'): ?>
                     <div class="existing-application">
                         <i class="fas fa-info-circle me-2"></i>
                         You already have a pending application submitted on 
-                        <?php echo date('F j, Y', strtotime($existing_application['submitted_at'])); ?>. 
+                        <?php echo isset($existing_application['submitted_at']) ? date('F j, Y', strtotime($existing_application['submitted_at'])) : ''; ?>. 
                         Our team is reviewing it. You'll be notified once verified.
                     </div>
                     <?php endif; ?>
@@ -543,20 +600,20 @@ $packages = $pdo->query("SELECT * FROM job_packages WHERE is_active = 1 ORDER BY
                                     <label class="form-label required-field">Company Name</label>
                                     <input type="text" class="form-control" name="company_name" required 
                                            placeholder="Enter official company name"
-                                           value="<?php echo isset($existing_application) ? htmlspecialchars($existing_application['company_name']) : ''; ?>">
+                                           value="<?php echo (!empty($existing_application) && isset($existing_application['company_name'])) ? htmlspecialchars($existing_application['company_name']) : ''; ?>">
                                 </div>
                                 
                                 <div class="col-md-6 mb-3">
                                     <label class="form-label required-field">Company Type</label>
                                     <select class="form-select" name="company_type" required>
                                         <option value="">Select company type</option>
-                                        <option value="Startup">Startup</option>
-                                        <option value="SME">Small & Medium Enterprise</option>
-                                        <option value="Corporation">Corporation</option>
-                                        <option value="Non-Profit">Non-Profit Organization</option>
-                                        <option value="Government">Government Agency</option>
-                                        <option value="Educational">Educational Institution</option>
-                                        <option value="Other">Other</option>
+                                        <option value="Startup" <?php echo (!empty($existing_application) && isset($existing_application['company_type']) && $existing_application['company_type'] == 'Startup') ? 'selected' : ''; ?>>Startup</option>
+                                        <option value="SME" <?php echo (!empty($existing_application) && isset($existing_application['company_type']) && $existing_application['company_type'] == 'SME') ? 'selected' : ''; ?>>Small & Medium Enterprise</option>
+                                        <option value="Corporation" <?php echo (!empty($existing_application) && isset($existing_application['company_type']) && $existing_application['company_type'] == 'Corporation') ? 'selected' : ''; ?>>Corporation</option>
+                                        <option value="Non-Profit" <?php echo (!empty($existing_application) && isset($existing_application['company_type']) && $existing_application['company_type'] == 'Non-Profit') ? 'selected' : ''; ?>>Non-Profit Organization</option>
+                                        <option value="Government" <?php echo (!empty($existing_application) && isset($existing_application['company_type']) && $existing_application['company_type'] == 'Government') ? 'selected' : ''; ?>>Government Agency</option>
+                                        <option value="Educational" <?php echo (!empty($existing_application) && isset($existing_application['company_type']) && $existing_application['company_type'] == 'Educational') ? 'selected' : ''; ?>>Educational Institution</option>
+                                        <option value="Other" <?php echo (!empty($existing_application) && isset($existing_application['company_type']) && $existing_application['company_type'] == 'Other') ? 'selected' : ''; ?>>Other</option>
                                     </select>
                                 </div>
                             </div>
@@ -566,15 +623,15 @@ $packages = $pdo->query("SELECT * FROM job_packages WHERE is_active = 1 ORDER BY
                                     <label class="form-label required-field">Industry</label>
                                     <select class="form-select" name="industry" required>
                                         <option value="">Select industry</option>
-                                        <option value="Technology">Technology</option>
-                                        <option value="Finance">Finance & Banking</option>
-                                        <option value="Healthcare">Healthcare</option>
-                                        <option value="Education">Education</option>
-                                        <option value="E-commerce">E-commerce</option>
-                                        <option value="Marketing">Marketing & Advertising</option>
-                                        <option value="Manufacturing">Manufacturing</option>
-                                        <option value="Consulting">Consulting</option>
-                                        <option value="Other">Other</option>
+                                        <option value="Technology" <?php echo (!empty($existing_application) && isset($existing_application['industry']) && $existing_application['industry'] == 'Technology') ? 'selected' : ''; ?>>Technology</option>
+                                        <option value="Finance" <?php echo (!empty($existing_application) && isset($existing_application['industry']) && $existing_application['industry'] == 'Finance') ? 'selected' : ''; ?>>Finance & Banking</option>
+                                        <option value="Healthcare" <?php echo (!empty($existing_application) && isset($existing_application['industry']) && $existing_application['industry'] == 'Healthcare') ? 'selected' : ''; ?>>Healthcare</option>
+                                        <option value="Education" <?php echo (!empty($existing_application) && isset($existing_application['industry']) && $existing_application['industry'] == 'Education') ? 'selected' : ''; ?>>Education</option>
+                                        <option value="E-commerce" <?php echo (!empty($existing_application) && isset($existing_application['industry']) && $existing_application['industry'] == 'E-commerce') ? 'selected' : ''; ?>>E-commerce</option>
+                                        <option value="Marketing" <?php echo (!empty($existing_application) && isset($existing_application['industry']) && $existing_application['industry'] == 'Marketing') ? 'selected' : ''; ?>>Marketing & Advertising</option>
+                                        <option value="Manufacturing" <?php echo (!empty($existing_application) && isset($existing_application['industry']) && $existing_application['industry'] == 'Manufacturing') ? 'selected' : ''; ?>>Manufacturing</option>
+                                        <option value="Consulting" <?php echo (!empty($existing_application) && isset($existing_application['industry']) && $existing_application['industry'] == 'Consulting') ? 'selected' : ''; ?>>Consulting</option>
+                                        <option value="Other" <?php echo (!empty($existing_application) && isset($existing_application['industry']) && $existing_application['industry'] == 'Other') ? 'selected' : ''; ?>>Other</option>
                                     </select>
                                 </div>
                                 
@@ -582,12 +639,12 @@ $packages = $pdo->query("SELECT * FROM job_packages WHERE is_active = 1 ORDER BY
                                     <label class="form-label required-field">Company Size</label>
                                     <select class="form-select" name="company_size" required>
                                         <option value="">Select company size</option>
-                                        <option value="1-10">1-10 employees</option>
-                                        <option value="11-50">11-50 employees</option>
-                                        <option value="51-200">51-200 employees</option>
-                                        <option value="201-500">201-500 employees</option>
-                                        <option value="501-1000">501-1000 employees</option>
-                                        <option value="1000+">1000+ employees</option>
+                                        <option value="1-10" <?php echo (!empty($existing_application) && isset($existing_application['company_size']) && $existing_application['company_size'] == '1-10') ? 'selected' : ''; ?>>1-10 employees</option>
+                                        <option value="11-50" <?php echo (!empty($existing_application) && isset($existing_application['company_size']) && $existing_application['company_size'] == '11-50') ? 'selected' : ''; ?>>11-50 employees</option>
+                                        <option value="51-200" <?php echo (!empty($existing_application) && isset($existing_application['company_size']) && $existing_application['company_size'] == '51-200') ? 'selected' : ''; ?>>51-200 employees</option>
+                                        <option value="201-500" <?php echo (!empty($existing_application) && isset($existing_application['company_size']) && $existing_application['company_size'] == '201-500') ? 'selected' : ''; ?>>201-500 employees</option>
+                                        <option value="501-1000" <?php echo (!empty($existing_application) && isset($existing_application['company_size']) && $existing_application['company_size'] == '501-1000') ? 'selected' : ''; ?>>501-1000 employees</option>
+                                        <option value="1000+" <?php echo (!empty($existing_application) && isset($existing_application['company_size']) && $existing_application['company_size'] == '1000+') ? 'selected' : ''; ?>>1000+ employees</option>
                                     </select>
                                 </div>
                             </div>
@@ -596,19 +653,19 @@ $packages = $pdo->query("SELECT * FROM job_packages WHERE is_active = 1 ORDER BY
                                 <label class="form-label required-field">Company Website</label>
                                 <input type="url" class="form-control" name="website" required 
                                        placeholder="https://yourcompany.com"
-                                       value="<?php echo isset($existing_application) ? htmlspecialchars($existing_application['website']) : ''; ?>">
+                                       value="<?php echo (!empty($existing_application) && isset($existing_application['website'])) ? htmlspecialchars($existing_application['website']) : ''; ?>">
                             </div>
                             
                             <div class="mb-3">
                                 <label class="form-label required-field">Company Description</label>
                                 <textarea class="form-control" name="description" rows="4" required 
-                                          placeholder="Brief description of your company, products/services, and mission"><?php echo isset($existing_application) ? htmlspecialchars($existing_application['description']) : ''; ?></textarea>
+                                          placeholder="Brief description of your company, products/services, and mission"><?php echo (!empty($existing_application) && isset($existing_application['description'])) ? htmlspecialchars($existing_application['description']) : ''; ?></textarea>
                             </div>
                             
                             <div class="mb-3">
                                 <label class="form-label">Company Address</label>
                                 <textarea class="form-control" name="address" rows="3" 
-                                          placeholder="Full company address"><?php echo isset($existing_application) ? htmlspecialchars($existing_application['address']) : ''; ?></textarea>
+                                          placeholder="Full company address"><?php echo (!empty($existing_application) && isset($existing_application['address'])) ? htmlspecialchars($existing_application['address']) : ''; ?></textarea>
                             </div>
                         </div>
                         
@@ -621,14 +678,14 @@ $packages = $pdo->query("SELECT * FROM job_packages WHERE is_active = 1 ORDER BY
                                     <label class="form-label required-field">Full Name</label>
                                     <input type="text" class="form-control" name="contact_name" required 
                                            placeholder="Contact person name"
-                                           value="<?php echo isset($existing_application) ? htmlspecialchars($existing_application['contact_name']) : ''; ?>">
+                                           value="<?php echo (!empty($existing_application) && isset($existing_application['contact_name'])) ? htmlspecialchars($existing_application['contact_name']) : ''; ?>">
                                 </div>
                                 
                                 <div class="col-md-6 mb-3">
                                     <label class="form-label required-field">Position/Title</label>
                                     <input type="text" class="form-control" name="contact_position" required 
                                            placeholder="e.g., HR Manager, Founder"
-                                           value="<?php echo isset($existing_application) ? htmlspecialchars($existing_application['contact_position']) : ''; ?>">
+                                           value="<?php echo (!empty($existing_application) && isset($existing_application['contact_position'])) ? htmlspecialchars($existing_application['contact_position']) : ''; ?>">
                                 </div>
                             </div>
                             
@@ -637,14 +694,20 @@ $packages = $pdo->query("SELECT * FROM job_packages WHERE is_active = 1 ORDER BY
                                     <label class="form-label required-field">Email Address</label>
                                     <input type="email" class="form-control" name="contact_email" required 
                                            placeholder="official@company.com"
-                                           value="<?php echo isset($existing_application) ? htmlspecialchars($existing_application['contact_email']) : $user_email; ?>">
+                                           value="<?php 
+                                               if (!empty($existing_application) && isset($existing_application['contact_email'])) {
+                                                   echo htmlspecialchars($existing_application['contact_email']);
+                                               } else {
+                                                   echo htmlspecialchars($user_email);
+                                               }
+                                           ?>">
                                 </div>
                                 
                                 <div class="col-md-6 mb-3">
                                     <label class="form-label required-field">Phone Number</label>
                                     <input type="tel" class="form-control" name="contact_phone" required 
                                            placeholder="+1 (555) 123-4567"
-                                           value="<?php echo isset($existing_application) ? htmlspecialchars($existing_application['contact_phone']) : ''; ?>">
+                                           value="<?php echo (!empty($existing_application) && isset($existing_application['contact_phone'])) ? htmlspecialchars($existing_application['contact_phone']) : ''; ?>">
                                 </div>
                             </div>
                         </div>
@@ -711,22 +774,22 @@ $packages = $pdo->query("SELECT * FROM job_packages WHERE is_active = 1 ORDER BY
                             <div class="row">
                                 <?php foreach ($packages as $index => $package): ?>
                                 <div class="col-md-4 mb-4">
-                                    <div class="package-card <?php echo $package['package_name'] === 'standard' ? 'recommended' : ''; ?>" 
-                                         onclick="selectPackage('<?php echo $package['package_name']; ?>')" 
-                                         id="package<?php echo ucfirst($package['package_name']); ?>">
-                                        <h5><?php echo ucfirst($package['package_name']); ?></h5>
-                                        <div class="package-price">$<?php echo number_format($package['price'], 2); ?></div>
+                                    <div class="package-card <?php echo (isset($package['package_name']) && $package['package_name'] === 'standard') ? 'recommended' : ''; ?>" 
+                                         onclick="selectPackage('<?php echo isset($package['package_name']) ? $package['package_name'] : 'standard'; ?>')" 
+                                         id="package<?php echo isset($package['package_name']) ? ucfirst($package['package_name']) : 'Standard'; ?>">
+                                        <h5><?php echo isset($package['package_name']) ? ucfirst($package['package_name']) : 'Standard'; ?></h5>
+                                        <div class="package-price">$<?php echo isset($package['price']) ? number_format($package['price'], 2) : '99.00'; ?></div>
                                         <p class="text-muted">per month</p>
                                         <ul class="package-features">
-                                            <li><i class="fas fa-check"></i> <?php echo $package['job_posts']; ?> Active Job Post<?php echo $package['job_posts'] > 1 ? 's' : ''; ?></li>
-                                            <li><i class="fas fa-check"></i> <?php echo $package['listing_days']; ?> Days Listing</li>
-                                            <li><i class="fas fa-check"></i> <?php echo $package['applications_limit'] ? $package['applications_limit'] . ' Applications Limit' : 'Unlimited Applications'; ?></li>
-                                            <li><i class="fas <?php echo $package['has_featured_tag'] ? 'fa-check' : 'fa-times text-muted'; ?>"></i> Featured Job Tag</li>
-                                            <li><i class="fas <?php echo $package['has_priority_support'] ? 'fa-check' : 'fa-times text-muted'; ?>"></i> Priority Support</li>
+                                            <li><i class="fas fa-check"></i> <?php echo isset($package['job_posts']) ? $package['job_posts'] : '3'; ?> Active Job Post<?php echo (isset($package['job_posts']) && $package['job_posts'] > 1) ? 's' : ''; ?></li>
+                                            <li><i class="fas fa-check"></i> <?php echo isset($package['listing_days']) ? $package['listing_days'] : '30'; ?> Days Listing</li>
+                                            <li><i class="fas fa-check"></i> <?php echo (isset($package['applications_limit']) && $package['applications_limit']) ? $package['applications_limit'] . ' Applications Limit' : 'Unlimited Applications'; ?></li>
+                                            <li><i class="fas <?php echo (isset($package['has_featured_tag']) && $package['has_featured_tag']) ? 'fa-check' : 'fa-times text-muted'; ?>"></i> Featured Job Tag</li>
+                                            <li><i class="fas <?php echo (isset($package['has_priority_support']) && $package['has_priority_support']) ? 'fa-check' : 'fa-times text-muted'; ?>"></i> Priority Support</li>
                                         </ul>
                                         <div class="text-center">
-                                            <button type="button" class="btn <?php echo $package['package_name'] === 'standard' ? 'btn-primary' : 'btn-outline-primary'; ?>">
-                                                Select <?php echo ucfirst($package['package_name']); ?>
+                                            <button type="button" class="btn <?php echo (isset($package['package_name']) && $package['package_name'] === 'standard') ? 'btn-primary' : 'btn-outline-primary'; ?>">
+                                                Select <?php echo isset($package['package_name']) ? ucfirst($package['package_name']) : 'Standard'; ?>
                                             </button>
                                         </div>
                                     </div>

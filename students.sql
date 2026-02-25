@@ -3,7 +3,7 @@
 -- https://www.phpmyadmin.net/
 --
 -- Host: 127.0.0.1:3306
--- Generation Time: Feb 25, 2026 at 04:46 AM
+-- Generation Time: Feb 25, 2026 at 05:08 AM
 -- Server version: 9.1.0
 -- PHP Version: 8.3.14
 
@@ -74,7 +74,7 @@ CREATE TABLE IF NOT EXISTS `activity_logs` (
   KEY `idx_action` (`action`),
   KEY `idx_created_at` (`created_at`),
   KEY `idx_ip_address` (`ip_address`)
-) ENGINE=InnoDB AUTO_INCREMENT=15 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+) ENGINE=InnoDB AUTO_INCREMENT=20 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 --
 -- Dumping data for table `activity_logs`
@@ -94,7 +94,12 @@ INSERT INTO `activity_logs` (`id`, `user_id`, `action`, `ip_address`, `user_agen
 (11, 2, 'logout', '::1', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36', 'User logged out', '2026-02-25 04:30:50'),
 (12, 2, 'login', '::1', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36', 'User logged in', '2026-02-25 04:30:57'),
 (13, 2, 'logout', '::1', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36', 'User logged out', '2026-02-25 04:33:16'),
-(14, 2, 'login', '::1', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36', 'User logged in', '2026-02-25 04:33:21');
+(14, 2, 'login', '::1', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36', 'User logged in', '2026-02-25 04:33:21'),
+(15, 2, 'company_application', '::1', NULL, 'Submitted company application for test', '2026-02-25 05:04:40'),
+(16, 2, 'company_application', '::1', NULL, 'Submitted company application for test', '2026-02-25 05:05:00'),
+(17, 2, 'company_application', '::1', NULL, 'Submitted company application for test', '2026-02-25 05:05:21'),
+(18, 2, 'company_application', '::1', NULL, 'Submitted company application for test', '2026-02-25 05:06:11'),
+(19, 2, 'company_application', '::1', NULL, 'Submitted company application for test', '2026-02-25 05:06:57');
 
 -- --------------------------------------------------------
 
@@ -234,7 +239,18 @@ CREATE TABLE IF NOT EXISTS `company_applications_new` (
   KEY `idx_status` (`status`),
   KEY `idx_submitted_at` (`submitted_at`),
   KEY `idx_company_name` (`company_name`)
-) ENGINE=MyISAM DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+) ENGINE=MyISAM AUTO_INCREMENT=6 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+--
+-- Dumping data for table `company_applications_new`
+--
+
+INSERT INTO `company_applications_new` (`id`, `user_id`, `company_name`, `company_type`, `industry`, `company_size`, `website`, `description`, `address`, `contact_name`, `contact_position`, `contact_email`, `contact_phone`, `selected_package`, `status`, `admin_notes`, `submitted_at`, `reviewed_at`, `reviewed_by`) VALUES
+(1, 2, 'test', 'Startup', 'Consulting', '1-10', 'https://claude.ai/chat/aced359a-d641-4f6f-9091-ab0c6be65d6e', 'test', 'test', 'test', 'test', 'test@test.com', '03196977218', 'standard', 'pending', NULL, '2026-02-25 05:04:40', NULL, NULL),
+(2, 2, 'test', 'Startup', 'Consulting', '1-10', 'https://claude.ai/chat/aced359a-d641-4f6f-9091-ab0c6be65d6e', 'test', 'test', 'test', 'test', 'test@test.com', '03196977218', 'premium', 'pending', NULL, '2026-02-25 05:05:00', NULL, NULL),
+(3, 2, 'test', 'Startup', 'Consulting', '1-10', 'https://claude.ai/chat/aced359a-d641-4f6f-9091-ab0c6be65d6e', 'test', 'test', 'test', 'test', 'test@test.com', '03196977218', 'standard', 'pending', NULL, '2026-02-25 05:05:21', NULL, NULL),
+(4, 2, 'test', 'Startup', 'Consulting', '1-10', 'https://claude.ai/chat/aced359a-d641-4f6f-9091-ab0c6be65d6e', 'test', 'test', 'test', 'test', 'test@test.com', '03196977218', 'standard', 'pending', NULL, '2026-02-25 05:06:11', NULL, NULL),
+(5, 2, 'test', 'Startup', 'Consulting', '1-10', 'https://claude.ai/chat/aced359a-d641-4f6f-9091-ab0c6be65d6e', 'test', 'test', 'test', 'test', 'test@test.com', '03196977218', 'standard', 'pending', NULL, '2026-02-25 05:06:57', NULL, NULL);
 
 -- --------------------------------------------------------
 

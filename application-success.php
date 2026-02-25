@@ -71,9 +71,9 @@ $id = isset($_GET['id']) ? intval($_GET['id']) : 0;
                 <strong>Submission Time:</strong> <?php echo date('F j, Y, g:i a'); ?>
             </p>
             <div>
-                <a href="dashboard.php" class="btn-custom me-2">
+                <!-- <a href="dashboard.php" class="btn-custom me-2">
                     <i class="fas fa-tachometer-alt me-2"></i>Go to Dashboard
-                </a>
+                </a> -->
                 <a href="index.php" class="btn btn-outline-secondary">
                     <i class="fas fa-home me-2"></i>Home
                 </a>
