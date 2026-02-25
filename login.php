@@ -124,6 +124,98 @@ function logActivity($pdo, $user_id, $action, $details = '') {
 }
 
 // ============================================
+// CHECK REMEMBER ME COOKIE
+// ============================================
+if (!isset($_SESSION['logged_in']) && isset($_COOKIE['remember_token'])) {
+    $stmt = $pdo->prepare("SELECT * FROM users WHERE remember_token = ?");
+    $stmt->execute([$_COOKIE['remember_token']]);
+    $user = $stmt->fetch();
+    if ($user) {
+        $_SESSION['user_id'] = $user['id'];
+        $_SESSION['user_name'] = $user['first_name'] . ' ' . $user['last_name'];
+        $_SESSION['user_email'] = $user['email'];
+        $_SESSION['user_type'] = $user['user_type'];
+        $_SESSION['logged_in'] = true;
+    }
+}
+
+// ============================================
+// FUNCTION TO CHECK APPLICATION STATUS
+// ============================================
+function hasPendingApplication($pdo, $user_id, $type) {
+    try {
+        if ($type === 'author') {
+            $stmt = $pdo->prepare("SELECT id FROM author_applications WHERE user_id = ? AND status = 'pending'");
+        } else if ($type === 'company') {
+            $stmt = $pdo->prepare("SELECT id FROM company_applications WHERE user_id = ? AND status = 'pending'");
+        } else {
+            return false;
+        }
+        $stmt->execute([$user_id]);
+        return $stmt->fetch() !== false;
+    } catch(Exception $e) {
+        return false;
+    }
+}
+
+function hasApprovedApplication($pdo, $user_id, $type) {
+    try {
+        if ($type === 'author') {
+            $stmt = $pdo->prepare("SELECT id FROM author_applications WHERE user_id = ? AND status = 'approved'");
+        } else if ($type === 'company') {
+            $stmt = $pdo->prepare("SELECT id FROM company_applications WHERE user_id = ? AND status = 'approved'");
+        } else {
+            return false;
+        }
+        $stmt->execute([$user_id]);
+        return $stmt->fetch() !== false;
+    } catch(Exception $e) {
+        return false;
+    }
+}
+
+// ============================================
+// REDIRECT BASED ON USER TYPE AND APPLICATION STATUS
+// ============================================
+function getRedirectUrl($pdo, $user_type, $user_id) {
+    // Students always go to homepage for now
+    if ($user_type === 'student') {
+        return 'index.php';
+    }
+    
+    // For authors
+    if ($user_type === 'author') {
+        // Check if they have a pending application
+        if (hasPendingApplication($pdo, $user_id, 'author')) {
+            return 'become-author.php'; // Stay on application page to show pending message
+        }
+        // Check if they have an approved application
+        if (hasApprovedApplication($pdo, $user_id, 'author')) {
+            return 'author-dashboard.php'; // Approved authors go to dashboard
+        }
+        // No application yet
+        return 'become-author.php';
+    }
+    
+    // For companies
+    if ($user_type === 'company') {
+        // Check if they have a pending application
+        if (hasPendingApplication($pdo, $user_id, 'company')) {
+            return 'apply-company.php'; // Stay on application page to show pending message
+        }
+        // Check if they have an approved application
+        if (hasApprovedApplication($pdo, $user_id, 'company')) {
+            return 'company-dashboard.php'; // Approved companies go to dashboard
+        }
+        // No application yet
+        return 'apply-company.php';
+    }
+    
+    // Default fallback
+    return 'index.php';
+}
+
+// ============================================
 // HANDLE AJAX REQUESTS
 // ============================================
 
@@ -153,15 +245,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                     if ($remember) {
                         $token = bin2hex(random_bytes(32));
                         $pdo->prepare("UPDATE users SET remember_token = ? WHERE id = ?")->execute([$token, $user['id']]);
-                        setcookie('remember_token', $token, time() + 86400 * 30, '/');
+                        setcookie('remember_token', $token, time() + 86400 * 30, '/', '', false, true);
                     }
 
                     logActivity($pdo, $user['id'], 'login', 'User logged in');
 
-                    // Send redirect URL based on user type
-                    $redirect = '';
-                    if ($user['user_type'] === 'author')  $redirect = 'become-author.php';
-                    if ($user['user_type'] === 'company') $redirect = 'apply-company.php';
+                    // Get redirect URL based on user type and application status
+                    $redirect = getRedirectUrl($pdo, $user['user_type'], $user['id']);
 
                     $response = [
                         'success'  => true,
@@ -206,10 +296,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
 
                     logActivity($pdo, $user_id, 'register', 'New user registered');
 
-                    // Send redirect URL based on user type
-                    $redirect = 'account.php';
+                    // Get redirect URL based on user type (new users go to application forms)
+                    $redirect = '';
                     if ($user_type === 'author')  $redirect = 'become-author.php';
                     if ($user_type === 'company') $redirect = 'apply-company.php';
+                    if ($user_type === 'student') $redirect = 'index.php';
+                    if (empty($redirect)) $redirect = 'index.php';
 
                     $response = [
                         'success'  => true,
@@ -235,14 +327,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                 if (isset($_COOKIE['remember_token'])) {
                     setcookie('remember_token', '', time() - 3600, '/');
                 }
-                $response = ['success' => true, 'message' => 'Logged out successfully'];
+                $response = ['success' => true, 'message' => 'Logged out successfully', 'redirect' => 'index.php'];
                 break;
 
             case 'check_session':
                 if (isset($_SESSION['logged_in']) && $_SESSION['logged_in']) {
-                    $redirect = 'account.php';
-                    if ($_SESSION['user_type'] === 'author')  $redirect = 'become-author.php';
-                    if ($_SESSION['user_type'] === 'company') $redirect = 'apply-company.php';
+                    // Get redirect URL based on user type and application status
+                    $redirect = getRedirectUrl($pdo, $_SESSION['user_type'], $_SESSION['user_id']);
 
                     $response = [
                         'logged_in' => true,
@@ -263,6 +354,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                     $response = ['success' => false, 'message' => 'Please login first'];
                     break;
                 }
+                
+                // Check if already has pending application
+                if (hasPendingApplication($pdo, $_SESSION['user_id'], 'author')) {
+                    $response = ['success' => false, 'message' => 'You already have a pending application'];
+                    break;
+                }
+                
                 $stmt = $pdo->prepare("INSERT INTO author_applications (user_id, full_name, expertise, bio, portfolio_url, writing_samples) VALUES (?, ?, ?, ?, ?, ?)");
                 if ($stmt->execute([
                     $_SESSION['user_id'],
@@ -284,6 +382,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                     $response = ['success' => false, 'message' => 'Please login first'];
                     break;
                 }
+                
+                // Check if already has pending application
+                if (hasPendingApplication($pdo, $_SESSION['user_id'], 'company')) {
+                    $response = ['success' => false, 'message' => 'You already have a pending application'];
+                    break;
+                }
+                
                 $stmt = $pdo->prepare("INSERT INTO company_applications (user_id, company_name, industry, website, company_size, description, contact_person, contact_position) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
                 if ($stmt->execute([
                     $_SESSION['user_id'],
@@ -296,7 +401,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                     sanitize($_POST['contact_position']?? '')
                 ])) {
                     logActivity($pdo, $_SESSION['user_id'], 'company_application', 'Submitted company application');
-                    $response = ['success' => true, 'message' => 'Company application submitted successfully!', 'redirect' => 'index.php'];
+                    $response = ['success' => true, 'message' => 'Company application submitted successfully!', 'redirect' => 'apply-company.php'];
                 } else {
                     $response = ['success' => false, 'message' => 'Failed to submit application'];
                 }
@@ -345,9 +450,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                     $_SESSION['user_type'] = $user['user_type'];
                     $_SESSION['logged_in'] = true;
 
-                    $redirect = 'account.php';
-                    if ($user['user_type'] === 'author')  $redirect = 'become-author.php';
-                    if ($user['user_type'] === 'company') $redirect = 'apply-company.php';
+                    // Get redirect URL based on user type and application status
+                    $redirect = getRedirectUrl($pdo, $user['user_type'], $user['id']);
 
                     $response = ['success' => true, 'redirect' => $redirect];
                 } else {
@@ -362,7 +466,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                         $_SESSION['user_email']= $google_data['email'];
                         $_SESSION['user_type'] = 'student';
                         $_SESSION['logged_in'] = true;
-                        $response = ['success' => true, 'redirect' => 'account.php'];
+                        $response = ['success' => true, 'redirect' => 'index.php'];
                     }
                 }
                 break;
@@ -373,31 +477,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
 
     echo json_encode($response);
     exit;
-}
-
-// Check remember me cookie
-if (!isset($_SESSION['logged_in']) && isset($_COOKIE['remember_token'])) {
-    $stmt = $pdo->prepare("SELECT * FROM users WHERE remember_token = ?");
-    $stmt->execute([$_COOKIE['remember_token']]);
-    $user = $stmt->fetch();
-    if ($user) {
-        $_SESSION['user_id']   = $user['id'];
-        $_SESSION['user_name'] = $user['first_name'] . ' ' . $user['last_name'];
-        $_SESSION['user_email']= $user['email'];
-        $_SESSION['user_type'] = $user['user_type'];
-        $_SESSION['logged_in'] = true;
-    }
-}
-
-// PHP-level redirect for already logged-in users visiting this page directly
-if (isset($_SESSION['logged_in']) && $_SESSION['logged_in']) {
-    if ($_SESSION['user_type'] === 'author') {
-        header('Location: become-author.php');
-        exit;
-    } elseif ($_SESSION['user_type'] === 'company') {
-        header('Location: apply-company.php');
-        exit;
-    }
 }
 ?>
 <!DOCTYPE html>
