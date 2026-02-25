@@ -1,3 +1,168 @@
+<?php
+session_start();
+require_once 'config/database.php';
+
+// Check if user is logged in
+if (!isset($_SESSION['logged_in']) || !$_SESSION['logged_in']) {
+    header('Location: login.php?redirect=apply-company.php');
+    exit;
+}
+
+$user_id = $_SESSION['user_id'];
+$user_name = $_SESSION['user_name'];
+$user_email = $_SESSION['user_email'];
+$user_type = $_SESSION['user_type'];
+
+// Handle form submission
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'submit_application') {
+    header('Content-Type: application/json');
+    
+    try {
+        // Validate required fields
+        $required_fields = ['company_name', 'company_type', 'industry', 'company_size', 'website', 'description', 'contact_name', 'contact_position', 'contact_email', 'contact_phone', 'selected_package'];
+        
+        foreach ($required_fields as $field) {
+            if (empty($_POST[$field])) {
+                throw new Exception("All required fields must be filled");
+            }
+        }
+        
+        // Validate email
+        if (!filter_var($_POST['contact_email'], FILTER_VALIDATE_EMAIL)) {
+            throw new Exception("Invalid email address");
+        }
+        
+        // Validate website
+        if (!filter_var($_POST['website'], FILTER_VALIDATE_URL)) {
+            throw new Exception("Invalid website URL");
+        }
+        
+        // Begin transaction
+        $pdo->beginTransaction();
+        
+        // Insert company application
+        $stmt = $pdo->prepare("
+            INSERT INTO company_applications_new (
+                user_id, company_name, company_type, industry, company_size, 
+                website, description, address, contact_name, contact_position, 
+                contact_email, contact_phone, selected_package
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ");
+        
+        $stmt->execute([
+            $user_id,
+            $_POST['company_name'],
+            $_POST['company_type'],
+            $_POST['industry'],
+            $_POST['company_size'],
+            $_POST['website'],
+            $_POST['description'],
+            $_POST['address'] ?? null,
+            $_POST['contact_name'],
+            $_POST['contact_position'],
+            $_POST['contact_email'],
+            $_POST['contact_phone'],
+            $_POST['selected_package']
+        ]);
+        
+        $application_id = $pdo->lastInsertId();
+        
+        // Handle file uploads
+        $upload_dir = 'uploads/company_documents/';
+        if (!file_exists($upload_dir)) {
+            mkdir($upload_dir, 0777, true);
+        }
+        
+        // Upload registration proof
+        if (isset($_FILES['registration_proof']) && $_FILES['registration_proof']['error'] === UPLOAD_ERR_OK) {
+            $file = $_FILES['registration_proof'];
+            $extension = pathinfo($file['name'], PATHINFO_EXTENSION);
+            $filename = 'reg_' . $application_id . '_' . time() . '.' . $extension;
+            $filepath = $upload_dir . $filename;
+            
+            if (move_uploaded_file($file['tmp_name'], $filepath)) {
+                // Insert into company_documents table (you might want to link to application)
+                // For now, we'll just store the path in session or handle later
+                $_SESSION['uploaded_docs'][] = $filepath;
+            }
+        }
+        
+        // Upload tax document if provided
+        if (isset($_FILES['tax_document']) && $_FILES['tax_document']['error'] === UPLOAD_ERR_OK) {
+            $file = $_FILES['tax_document'];
+            $extension = pathinfo($file['name'], PATHINFO_EXTENSION);
+            $filename = 'tax_' . $application_id . '_' . time() . '.' . $extension;
+            $filepath = $upload_dir . $filename;
+            
+            if (move_uploaded_file($file['tmp_name'], $filepath)) {
+                $_SESSION['uploaded_docs'][] = $filepath;
+            }
+        }
+        
+        // Upload additional documents
+        if (isset($_FILES['additional_docs']) && !empty($_FILES['additional_docs']['name'][0])) {
+            $files = $_FILES['additional_docs'];
+            $file_count = count($files['name']);
+            
+            for ($i = 0; $i < $file_count; $i++) {
+                if ($files['error'][$i] === UPLOAD_ERR_OK) {
+                    $extension = pathinfo($files['name'][$i], PATHINFO_EXTENSION);
+                    $filename = 'add_' . $application_id . '_' . time() . '_' . $i . '.' . $extension;
+                    $filepath = $upload_dir . $filename;
+                    
+                    if (move_uploaded_file($files['tmp_name'][$i], $filepath)) {
+                        $_SESSION['uploaded_docs'][] = $filepath;
+                    }
+                }
+            }
+        }
+        
+        // Log activity
+        $log_stmt = $pdo->prepare("INSERT INTO activity_logs (user_id, action, details, ip_address) VALUES (?, 'company_application', ?, ?)");
+        $log_stmt->execute([$user_id, 'Submitted company application for ' . $_POST['company_name'], $_SERVER['REMOTE_ADDR']]);
+        
+        // Commit transaction
+        $pdo->commit();
+        
+        // Send confirmation email (implement email function)
+        sendCompanyApplicationEmail($user_email, $_POST['company_name']);
+        
+        echo json_encode([
+            'success' => true,
+            'message' => 'Application submitted successfully! Our team will review your application within 24-48 hours.',
+            'application_id' => $application_id
+        ]);
+        
+    } catch (Exception $e) {
+        $pdo->rollBack();
+        echo json_encode([
+            'success' => false,
+            'message' => $e->getMessage()
+        ]);
+    }
+    exit;
+}
+
+// Function to send email (implement based on your email setup)
+function sendCompanyApplicationEmail($email, $company_name) {
+    // Use PHP mailer or your preferred email sending method
+    $subject = "Company Application Received - StudentsArea";
+    $message = "Dear $company_name,\n\n";
+    $message .= "Thank you for submitting your company application to StudentsArea. Our team will review your application within 24-48 hours.\n\n";
+    $message .= "Once verified, you'll be able to post jobs and connect with talented students.\n\n";
+    $message .= "Best regards,\nStudentsArea Team";
+    
+    mail($email, $subject, $message);
+}
+
+// Get user's existing applications
+$stmt = $pdo->prepare("SELECT * FROM company_applications_new WHERE user_id = ? ORDER BY submitted_at DESC LIMIT 1");
+$stmt->execute([$user_id]);
+$existing_application = $stmt->fetch();
+
+// Get available packages
+$packages = $pdo->query("SELECT * FROM job_packages WHERE is_active = 1 ORDER BY price")->fetchAll();
+?>
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -254,6 +419,24 @@
         margin-right: 0.5rem;
     }
     
+    .alert-message {
+        position: fixed;
+        top: 20px;
+        right: 20px;
+        z-index: 9999;
+        min-width: 300px;
+        display: none;
+    }
+    
+    .existing-application {
+        background: #fff3cd;
+        border: 1px solid #ffeeba;
+        border-radius: 8px;
+        padding: 1rem;
+        margin-bottom: 2rem;
+        color: #856404;
+    }
+    
     @media (max-width: 768px) {
         .company-apply-section {
             padding: 5rem 0 2rem;
@@ -268,18 +451,47 @@
             right: -35px;
             padding: 0.3rem 2.5rem;
         }
+        
+        .alert-message {
+            min-width: auto;
+            left: 20px;
+            right: 20px;
+        }
     }
     </style>
 </head>
 <body>
     <!-- Include Navbar -->
-    <?php include 'includes/navbar.php' ?>
+    <?php include 'includes/navbar.php'; ?>
+    
+    <!-- Alert Message -->
+    <div class="alert-message" id="alertMessage">
+        <div class="alert alert-dismissible fade show" role="alert">
+            <span id="alertText"></span>
+            <button type="button" class="btn-close" onclick="hideAlert()"></button>
+        </div>
+    </div>
     
     <!-- Company Application Section -->
     <section class="company-apply-section">
         <div class="container">
             <div class="row">
                 <div class="col-lg-8">
+                    <!-- Welcome User -->
+                    <div class="mb-4">
+                        <h2>Welcome, <?php echo htmlspecialchars($user_name); ?>!</h2>
+                        <p class="text-muted">Complete your company profile to start posting jobs.</p>
+                    </div>
+                    
+                    <?php if ($existing_application && $existing_application['status'] === 'pending'): ?>
+                    <div class="existing-application">
+                        <i class="fas fa-info-circle me-2"></i>
+                        You already have a pending application submitted on 
+                        <?php echo date('F j, Y', strtotime($existing_application['submitted_at'])); ?>. 
+                        Our team is reviewing it. You'll be notified once verified.
+                    </div>
+                    <?php endif; ?>
+                    
                     <!-- Verification Steps -->
                     <div class="verification-steps">
                         <h2 class="section-heading">Company Verification Process</h2>
@@ -319,7 +531,9 @@
                     </div>
                     
                     <!-- Company Information Form -->
-                    <form id="companyApplicationForm">
+                    <form id="companyApplicationForm" enctype="multipart/form-data">
+                        <input type="hidden" name="action" value="submit_application">
+                        
                         <!-- Company Details Section -->
                         <div class="form-section">
                             <h3 class="section-title">Company Information</h3>
@@ -327,7 +541,9 @@
                             <div class="row">
                                 <div class="col-md-6 mb-3">
                                     <label class="form-label required-field">Company Name</label>
-                                    <input type="text" class="form-control" name="company_name" required placeholder="Enter official company name">
+                                    <input type="text" class="form-control" name="company_name" required 
+                                           placeholder="Enter official company name"
+                                           value="<?php echo isset($existing_application) ? htmlspecialchars($existing_application['company_name']) : ''; ?>">
                                 </div>
                                 
                                 <div class="col-md-6 mb-3">
@@ -378,17 +594,21 @@
                             
                             <div class="mb-3">
                                 <label class="form-label required-field">Company Website</label>
-                                <input type="url" class="form-control" name="website" required placeholder="https://yourcompany.com">
+                                <input type="url" class="form-control" name="website" required 
+                                       placeholder="https://yourcompany.com"
+                                       value="<?php echo isset($existing_application) ? htmlspecialchars($existing_application['website']) : ''; ?>">
                             </div>
                             
                             <div class="mb-3">
                                 <label class="form-label required-field">Company Description</label>
-                                <textarea class="form-control" name="description" rows="4" required placeholder="Brief description of your company, products/services, and mission"></textarea>
+                                <textarea class="form-control" name="description" rows="4" required 
+                                          placeholder="Brief description of your company, products/services, and mission"><?php echo isset($existing_application) ? htmlspecialchars($existing_application['description']) : ''; ?></textarea>
                             </div>
                             
                             <div class="mb-3">
                                 <label class="form-label">Company Address</label>
-                                <textarea class="form-control" name="address" rows="3" placeholder="Full company address"></textarea>
+                                <textarea class="form-control" name="address" rows="3" 
+                                          placeholder="Full company address"><?php echo isset($existing_application) ? htmlspecialchars($existing_application['address']) : ''; ?></textarea>
                             </div>
                         </div>
                         
@@ -399,24 +619,32 @@
                             <div class="row">
                                 <div class="col-md-6 mb-3">
                                     <label class="form-label required-field">Full Name</label>
-                                    <input type="text" class="form-control" name="contact_name" required placeholder="Contact person name">
+                                    <input type="text" class="form-control" name="contact_name" required 
+                                           placeholder="Contact person name"
+                                           value="<?php echo isset($existing_application) ? htmlspecialchars($existing_application['contact_name']) : ''; ?>">
                                 </div>
                                 
                                 <div class="col-md-6 mb-3">
                                     <label class="form-label required-field">Position/Title</label>
-                                    <input type="text" class="form-control" name="contact_position" required placeholder="e.g., HR Manager, Founder">
+                                    <input type="text" class="form-control" name="contact_position" required 
+                                           placeholder="e.g., HR Manager, Founder"
+                                           value="<?php echo isset($existing_application) ? htmlspecialchars($existing_application['contact_position']) : ''; ?>">
                                 </div>
                             </div>
                             
                             <div class="row">
                                 <div class="col-md-6 mb-3">
                                     <label class="form-label required-field">Email Address</label>
-                                    <input type="email" class="form-control" name="contact_email" required placeholder="official@company.com">
+                                    <input type="email" class="form-control" name="contact_email" required 
+                                           placeholder="official@company.com"
+                                           value="<?php echo isset($existing_application) ? htmlspecialchars($existing_application['contact_email']) : $user_email; ?>">
                                 </div>
                                 
                                 <div class="col-md-6 mb-3">
                                     <label class="form-label required-field">Phone Number</label>
-                                    <input type="tel" class="form-control" name="contact_phone" required placeholder="+1 (555) 123-4567">
+                                    <input type="tel" class="form-control" name="contact_phone" required 
+                                           placeholder="+1 (555) 123-4567"
+                                           value="<?php echo isset($existing_application) ? htmlspecialchars($existing_application['contact_phone']) : ''; ?>">
                                 </div>
                             </div>
                         </div>
@@ -432,7 +660,8 @@
                                     <i class="fas fa-file-pdf"></i>
                                     <h5>Upload Registration Document</h5>
                                     <p class="text-muted">PDF, JPG, or PNG (Max 5MB)</p>
-                                    <input type="file" id="registrationProof" name="registration_proof" accept=".pdf,.jpg,.jpeg,.png" style="display: none;" required>
+                                    <input type="file" id="registrationProof" name="registration_proof" 
+                                           accept=".pdf,.jpg,.jpeg,.png" style="display: none;" required>
                                     <div id="registrationProofPreview" class="uploaded-file d-none">
                                         <i class="fas fa-check-circle text-success me-2"></i>
                                         <span id="registrationProofName"></span>
@@ -447,7 +676,8 @@
                                     <i class="fas fa-file-invoice"></i>
                                     <h5>Upload Tax Document</h5>
                                     <p class="text-muted">PDF, JPG, or PNG (Max 5MB)</p>
-                                    <input type="file" id="taxDocument" name="tax_document" accept=".pdf,.jpg,.jpeg,.png" style="display: none;">
+                                    <input type="file" id="taxDocument" name="tax_document" 
+                                           accept=".pdf,.jpg,.jpeg,.png" style="display: none;">
                                     <div id="taxDocumentPreview" class="uploaded-file d-none">
                                         <i class="fas fa-check-circle text-success me-2"></i>
                                         <span id="taxDocumentName"></span>
@@ -462,7 +692,8 @@
                                     <i class="fas fa-file-archive"></i>
                                     <h5>Upload Additional Documents</h5>
                                     <p class="text-muted">PDF, JPG, or PNG (Max 10MB)</p>
-                                    <input type="file" id="additionalDocs" name="additional_docs" accept=".pdf,.jpg,.jpeg,.png" style="display: none;" multiple>
+                                    <input type="file" id="additionalDocs" name="additional_docs[]" 
+                                           accept=".pdf,.jpg,.jpeg,.png" style="display: none;" multiple>
                                     <div id="additionalDocsPreview" class="uploaded-file d-none">
                                         <i class="fas fa-check-circle text-success me-2"></i>
                                         <span id="additionalDocsCount"></span> file(s) selected
@@ -478,62 +709,29 @@
                             <p class="text-muted mb-4">Choose a package that fits your hiring needs</p>
                             
                             <div class="row">
+                                <?php foreach ($packages as $index => $package): ?>
                                 <div class="col-md-4 mb-4">
-                                    <div class="package-card" onclick="selectPackage('basic')" id="packageBasic">
-                                        <h5>Basic</h5>
-                                        <div class="package-price">$49</div>
+                                    <div class="package-card <?php echo $package['package_name'] === 'standard' ? 'recommended' : ''; ?>" 
+                                         onclick="selectPackage('<?php echo $package['package_name']; ?>')" 
+                                         id="package<?php echo ucfirst($package['package_name']); ?>">
+                                        <h5><?php echo ucfirst($package['package_name']); ?></h5>
+                                        <div class="package-price">$<?php echo number_format($package['price'], 2); ?></div>
                                         <p class="text-muted">per month</p>
                                         <ul class="package-features">
-                                            <li><i class="fas fa-check"></i> 1 Active Job Post</li>
-                                            <li><i class="fas fa-check"></i> 30 Days Listing</li>
-                                            <li><i class="fas fa-check"></i> Basic Company Profile</li>
-                                            <li><i class="fas fa-check"></i> 50 Applications Limit</li>
-                                            <li><i class="fas fa-times text-muted"></i> Featured Job Tag</li>
-                                            <li><i class="fas fa-times text-muted"></i> Priority Support</li>
+                                            <li><i class="fas fa-check"></i> <?php echo $package['job_posts']; ?> Active Job Post<?php echo $package['job_posts'] > 1 ? 's' : ''; ?></li>
+                                            <li><i class="fas fa-check"></i> <?php echo $package['listing_days']; ?> Days Listing</li>
+                                            <li><i class="fas fa-check"></i> <?php echo $package['applications_limit'] ? $package['applications_limit'] . ' Applications Limit' : 'Unlimited Applications'; ?></li>
+                                            <li><i class="fas <?php echo $package['has_featured_tag'] ? 'fa-check' : 'fa-times text-muted'; ?>"></i> Featured Job Tag</li>
+                                            <li><i class="fas <?php echo $package['has_priority_support'] ? 'fa-check' : 'fa-times text-muted'; ?>"></i> Priority Support</li>
                                         </ul>
                                         <div class="text-center">
-                                            <button type="button" class="btn btn-outline-primary">Select Basic</button>
+                                            <button type="button" class="btn <?php echo $package['package_name'] === 'standard' ? 'btn-primary' : 'btn-outline-primary'; ?>">
+                                                Select <?php echo ucfirst($package['package_name']); ?>
+                                            </button>
                                         </div>
                                     </div>
                                 </div>
-                                
-                                <div class="col-md-4 mb-4">
-                                    <div class="package-card recommended" onclick="selectPackage('standard')" id="packageStandard">
-                                        <h5>Standard</h5>
-                                        <div class="package-price">$99</div>
-                                        <p class="text-muted">per month</p>
-                                        <ul class="package-features">
-                                            <li><i class="fas fa-check"></i> 3 Active Job Posts</li>
-                                            <li><i class="fas fa-check"></i> 45 Days Listing</li>
-                                            <li><i class="fas fa-check"></i> Enhanced Company Profile</li>
-                                            <li><i class="fas fa-check"></i> 150 Applications Limit</li>
-                                            <li><i class="fas fa-check"></i> Featured Job Tag</li>
-                                            <li><i class="fas fa-times text-muted"></i> Priority Support</li>
-                                        </ul>
-                                        <div class="text-center">
-                                            <button type="button" class="btn btn-primary">Select Standard</button>
-                                        </div>
-                                    </div>
-                                </div>
-                                
-                                <div class="col-md-4 mb-4">
-                                    <div class="package-card" onclick="selectPackage('premium')" id="packagePremium">
-                                        <h5>Premium</h5>
-                                        <div class="package-price">$199</div>
-                                        <p class="text-muted">per month</p>
-                                        <ul class="package-features">
-                                            <li><i class="fas fa-check"></i> 10 Active Job Posts</li>
-                                            <li><i class="fas fa-check"></i> 60 Days Listing</li>
-                                            <li><i class="fas fa-check"></i> Premium Company Profile</li>
-                                            <li><i class="fas fa-check"></i> Unlimited Applications</li>
-                                            <li><i class="fas fa-check"></i> Featured Job Tag</li>
-                                            <li><i class="fas fa-check"></i> Priority Support</li>
-                                        </ul>
-                                        <div class="text-center">
-                                            <button type="button" class="btn btn-outline-primary">Select Premium</button>
-                                        </div>
-                                    </div>
-                                </div>
+                                <?php endforeach; ?>
                             </div>
                             
                             <input type="hidden" name="selected_package" id="selectedPackage" value="standard">
@@ -550,7 +748,7 @@
                                     <span class="text-muted me-2">Already have an account?</span>
                                     <a href="login.php?type=company" class="text-primary">Company Login</a>
                                 </div>
-                                <button type="submit" class="btn-primary btn-lg">
+                                <button type="submit" class="btn-primary btn-lg" id="submitBtn">
                                     <i class="fas fa-paper-plane me-2"></i>Submit Application
                                 </button>
                             </div>
@@ -658,12 +856,12 @@
     </section>
     
     <!-- Include Footer -->
-    <?php include 'includes/footer_v1.php' ?>
+    <?php include 'includes/footer_v1.php'; ?>
     
     <!-- Bootstrap 5 JS Bundle with Popper -->
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/js/bootstrap.bundle.min.js"></script>
-    <!-- Custom JS -->
-    <script src="assets/js/main.min.js"></script>
+    <!-- jQuery -->
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
     
     <script>
     // Package Selection
@@ -680,15 +878,19 @@
         
         // Add selected class to chosen package
         const selectedCard = document.getElementById('package' + packageType.charAt(0).toUpperCase() + packageType.slice(1));
-        selectedCard.classList.add('selected');
+        if (selectedCard) {
+            selectedCard.classList.add('selected');
+        }
         
         // Update button styles
         document.querySelectorAll('.package-card .btn').forEach(btn => {
             btn.className = 'btn btn-outline-primary';
         });
         
-        const selectedBtn = selectedCard.querySelector('.btn');
-        selectedBtn.className = 'btn btn-primary';
+        const selectedBtn = selectedCard ? selectedCard.querySelector('.btn') : null;
+        if (selectedBtn) {
+            selectedBtn.className = 'btn btn-primary';
+        }
     }
     
     // File Upload Handling
@@ -723,7 +925,36 @@
         preview.classList.add('d-none');
     }
     
-    // Form Submission
+    // Show alert message
+    function showAlert(message, type = 'success') {
+        const alertDiv = document.getElementById('alertMessage');
+        const alertText = document.getElementById('alertText');
+        const alert = alertDiv.querySelector('.alert');
+        
+        alert.classList.remove('alert-success', 'alert-danger', 'alert-warning', 'alert-info');
+        
+        if (type === 'success') {
+            alert.classList.add('alert-success');
+        } else if (type === 'error') {
+            alert.classList.add('alert-danger');
+        } else if (type === 'warning') {
+            alert.classList.add('alert-warning');
+        } else {
+            alert.classList.add('alert-info');
+        }
+        
+        alertText.textContent = message;
+        alertDiv.style.display = 'block';
+        
+        // Auto hide after 5 seconds
+        setTimeout(hideAlert, 5000);
+    }
+    
+    function hideAlert() {
+        document.getElementById('alertMessage').style.display = 'none';
+    }
+    
+    // Form Submission with AJAX
     document.getElementById('companyApplicationForm').addEventListener('submit', function(e) {
         e.preventDefault();
         
@@ -740,30 +971,67 @@
             }
         });
         
+        // Check if registration proof is uploaded
+        const regProof = document.getElementById('registrationProof');
+        if (regProof.files.length === 0) {
+            isValid = false;
+            showAlert('Please upload company registration proof', 'error');
+            return;
+        }
+        
+        // Check terms
+        if (!document.getElementById('termsCheck').checked) {
+            isValid = false;
+            showAlert('Please agree to the terms and conditions', 'error');
+            return;
+        }
+        
         if (!isValid) {
-            alert('Please fill in all required fields.');
+            showAlert('Please fill in all required fields', 'error');
             return;
         }
         
         // Show loading state
-        const submitBtn = this.querySelector('button[type="submit"]');
+        const submitBtn = document.getElementById('submitBtn');
         const originalText = submitBtn.innerHTML;
         submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Processing...';
         submitBtn.disabled = true;
         
-        // Simulate form submission (in real implementation, this would be AJAX)
-        setTimeout(() => {
-            alert('Application submitted successfully! Our team will review your application within 24-48 hours. You will receive a confirmation email shortly.');
+        // Create FormData object for file upload
+        const formData = new FormData(this);
+        
+        // AJAX submission
+        fetch(window.location.href, {
+            method: 'POST',
+            body: formData
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                showAlert(data.message, 'success');
+                // Optional: redirect to success page
+                setTimeout(() => {
+                    window.location.href = 'application-success.php?type=company&id=' + data.application_id;
+                }, 3000);
+            } else {
+                showAlert(data.message, 'error');
+                submitBtn.innerHTML = originalText;
+                submitBtn.disabled = false;
+            }
+        })
+        .catch(error => {
+            console.error('Error:', error);
+            showAlert('An error occurred. Please try again.', 'error');
             submitBtn.innerHTML = originalText;
             submitBtn.disabled = false;
-            // In real implementation, redirect to confirmation page
-            // window.location.href = 'application-success.php';
-        }, 2000);
+        });
     });
     
     // Initialize with standard package selected
     document.addEventListener('DOMContentLoaded', function() {
+        <?php if (!empty($packages)): ?>
         selectPackage('standard');
+        <?php endif; ?>
     });
     </script>
 </body>
